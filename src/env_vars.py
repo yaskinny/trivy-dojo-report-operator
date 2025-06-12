@@ -1,18 +1,20 @@
 import os
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+def get_required_env_var(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None:
+        logger.error(f"Required environment variable '{name}' is not set")
+        raise SystemExit(1)
+    return value
 
-def get_required_env_var(name):
-    """Returns value of a required environment variable. Fails if not found"""
-    try:
-        return os.environ[name]
-    except KeyError:
-        logger.error(f"{name} environment variable is required! Exiting.")
-        exit(1)
+def get_env_var_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    return value.lower() == "true" if value is not None else default
 
-
-def get_env_var_bool(name):
-    """Gets value of environment variable as a boolean. If not 'true', returns False"""
-    return os.getenv(name) == "true"
+def get_env_var_list(name: str, default: list[str] = None) -> list[str]:
+    value = os.getenv(name)
+    return value.split(",") if value else (default or [])

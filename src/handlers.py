@@ -1,201 +1,180 @@
 import json
+import logging
 from io import BytesIO
+from typing import Dict, List, Any
 import requests
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, RequestException
 import kopf
+import prometheus_client as prometheus
 
 import settings
 
-import prometheus_client as prometheus
+logger = logging.getLogger(__name__)
 
 prometheus.start_http_server(9090)
 REQUEST_TIME = prometheus.Summary(
     "request_processing_seconds", "Time spent processing request"
 )
-PROMETHEUS_DISABLE_CREATED_SERIES = True
-
-c = prometheus.Counter("requests_total", "HTTP Requests", ["status"])
+REQUESTS_TOTAL = prometheus.Counter(
+    "requests_total", "Total HTTP Requests", ["status"]
+)
 
 proxies = {
-    "http": settings.HTTP_PROXY,
-    "https": settings.HTTPS_PROXY,
-} if settings.HTTP_PROXY or settings.HTTPS_PROXY else None
+    "http": settings.Settings.HTTP_PROXY,
+    "https": settings.Settings.HTTPS_PROXY,
+} if settings.Settings.HTTP_PROXY or settings.Settings.HTTPS_PROXY else None
+
+ALLOWED_REPORTS: List[str] = [
+    "configauditreports",
+    "vulnerabilityreports",
+    "exposedsecretreports",
+    "infraassessmentreports",
+    "rbacassessmentreports",
+]
+
+def validate_reports(reports: List[str]) -> None:
+    for report in reports:
+        if report not in ALLOWED_REPORTS:
+            logger.error(
+                f"Invalid report type: {report}. Allowed reports: {', '.join(ALLOWED_REPORTS)}"
+            )
+            raise SystemExit(1)
 
 @kopf.on.probe(id="health")
-def healthCheck(**kwargs):
-  return "ok"
-
-def check_allowed_reports(report: str):
-    allowed_reports: list[str] = [
-        "configauditreports",
-        "vulnerabilityreports",
-        "exposedsecretreports",
-        "infraassessmentreports",
-        "rbacassessmentreports",
-    ]
-
-    if report not in allowed_reports:
-        print(
-            f"[ERROR] report {report} is not allowed. Allowed reports: {allowed_reports}"
-        )
-        exit(1)
-
+def health_check(**kwargs) -> str:
+    return "ok"
 
 @kopf.on.startup()
-def configure(settings: kopf.OperatorSettings, **_):
-    """
-    Configure kopf
-    """
-
-    # kopf randomly stops watching resources. setting timeouts is supposed to help.
-    # see these issue for more info:
-    # https://github.com/nolar/kopf/issues/957
-    # https://github.com/nolar/kopf/issues/585
-    # https://github.com/nolar/kopf/issues/955
-    # see https://kopf.readthedocs.io/en/latest/configuration/#api-timeouts
+def configure_kopf(settings: kopf.OperatorSettings, **_) -> None:
     settings.watching.connect_timeout = 60
     settings.watching.server_timeout = 600
     settings.watching.client_timeout = 610
 
-    # This function tells kopf to use the StatusDiffBaseStorage instead
-    # of the annotations-based storage, because the annotation will get too large
-    # for k8s to handle. see: https://github.com/kubernetes-sigs/kubebuilder/issues/2556
     settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
-        [
-            kopf.StatusDiffBaseStorage(field="status.diff-base"),
-        ]
+        [kopf.StatusDiffBaseStorage(field="status.diff-base")]
     )
 
+def evaluate_setting(value: str, context: Dict[str, Any], default: str = "") -> str:
+    try:
+        return str(eval(value, {}, context)) if value else default
+    except Exception as e:
+        logger.error(f"Error evaluating setting '{value}': {e}")
+        return default
 
-labels: dict = {}
-if settings.LABEL and settings.LABEL_VALUE:
-    labels = {settings.LABEL: settings.LABEL_VALUE}
-else:
-    labels = {}
+def prepare_dojo_data(body: Dict, meta: Dict) -> Dict:
+    context = {"meta": meta, "body": body}
 
-for report in settings.REPORTS:
-    # check if reports are allowed
-    check_allowed_reports(report)
+    tags = []
+    if settings.Settings.DEFECT_DOJO_EVAL_TAGS:
+        for tag in settings.Settings.DEFECT_DOJO_TAGS:
+            evaluated_tag = evaluate_setting(tag, context)
+            if evaluated_tag:
+                tags.append(evaluated_tag)
 
-    @REQUEST_TIME.time()
-    @kopf.on.create(report.lower() + ".aquasecurity.github.io", labels=labels)
-    def send_to_dojo(body, meta, logger, **_):
-        """
-        The main function that creates a report-file from the trivy-operator vulnerabilityreport
-        and sends it to the defectdojo instance.
-        """
+    return {
+        "active": settings.Settings.DEFECT_DOJO_ACTIVE,
+        "verified": settings.Settings.DEFECT_DOJO_VERIFIED,
+        "close_old_findings": settings.Settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS,
+        "close_old_findings_product_scope": settings.Settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS_PRODUCT_SCOPE,
+        "push_to_jira": settings.Settings.DEFECT_DOJO_PUSH_TO_JIRA,
+        "minimum_severity": settings.Settings.DEFECT_DOJO_MINIMUM_SEVERITY,
+        "auto_create_context": settings.Settings.DEFECT_DOJO_AUTO_CREATE_CONTEXT,
+        "deduplication_on_engagement": settings.Settings.DEFECT_DOJO_DEDUPLICATION_ON_ENGAGEMENT,
+        "scan_type": "Trivy Operator Scan",
+        "engagement_name": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_ENGAGEMENT_NAME,
+            context,
+            settings.Settings.DEFECT_DOJO_ENGAGEMENT_NAME or ""
+        ) if settings.Settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else settings.Settings.DEFECT_DOJO_ENGAGEMENT_NAME or "",
+        "product_name": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_PRODUCT_NAME,
+            context,
+            settings.Settings.DEFECT_DOJO_PRODUCT_NAME
+        ) if settings.Settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.Settings.DEFECT_DOJO_PRODUCT_NAME,
+        "product_type_name": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_PRODUCT_TYPE_NAME,
+            context,
+            settings.Settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
+        ) if settings.Settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME else settings.Settings.DEFECT_DOJO_PRODUCT_TYPE_NAME,
+        "service": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_SERVICE_NAME,
+            context,
+            settings.Settings.DEFECT_DOJO_SERVICE_NAME
+        ) if settings.Settings.DEFECT_DOJO_EVAL_SERVICE_NAME else settings.Settings.DEFECT_DOJO_SERVICE_NAME,
+        "environment": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_ENV_NAME,
+            context,
+            settings.Settings.DEFECT_DOJO_ENV_NAME
+        ) if settings.Settings.DEFECT_DOJO_EVAL_ENV_NAME else settings.Settings.DEFECT_DOJO_ENV_NAME,
+        "test_title": evaluate_setting(
+            settings.Settings.DEFECT_DOJO_TEST_TITLE,
+            context,
+            settings.Settings.DEFECT_DOJO_TEST_TITLE
+        ) if settings.Settings.DEFECT_DOJO_EVAL_TEST_TITLE else settings.Settings.DEFECT_DOJO_TEST_TITLE,
+        "do_not_reactivate": settings.Settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
+        "tags": tags,
+    }
 
-        logger.info(f"Working on {body['kind']} {meta['name']}")
+@REQUEST_TIME.time()
+def send_to_dojo(body: Dict, meta: Dict[str, str], logger: Any, **_) -> None:
+    logger.info(f"Processing {body['kind']} {meta['name']}")
 
-        # body is the whole kubernetes manifest of a vulnerabilityreport
-        # body is a Python-Object that is not json-serializable,
-        # but body[kind], body[metadata] and so on are
-        # so we create a new json-object here, since kopf does not provide this
-        full_object: dict = {}
-        for i in body:
-            full_object[i] = body[i]
+    report_data = dict(body)
+    logger.debug(json.dumps(report_data, indent=2))
 
-        logger.debug(full_object)
+    json_string = json.dumps(report_data)
+    json_file = BytesIO(json_string.encode("utf-8"))
+    files = {"file": ("report.json", json_file)}
 
-        _DEFECT_DOJO_ENGAGEMENT_NAME = (
-            eval(settings.DEFECT_DOJO_ENGAGEMENT_NAME)
-            if settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME
-            else settings.DEFECT_DOJO_ENGAGEMENT_NAME
+    headers = {
+        "Authorization": f"Token {settings.Settings.DEFECT_DOJO_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    data = prepare_dojo_data(body, meta)
+
+    try:
+        response = requests.post(
+            f"{settings.Settings.DEFECT_DOJO_URL}/api/v2/reimport-scan/",
+            headers=headers,
+            data=data,
+            files=files,
+            verify=True,
+            proxies=proxies,
+            timeout=5,
         )
+        response.raise_for_status()
 
-        _DEFECT_DOJO_PRODUCT_NAME = (
-            eval(settings.DEFECT_DOJO_PRODUCT_NAME)
-            if settings.DEFECT_DOJO_EVAL_PRODUCT_NAME
-            else settings.DEFECT_DOJO_PRODUCT_NAME
+        response_json = response.json()
+        patch_response = requests.patch(
+            f"{settings.Settings.DEFECT_DOJO_URL}/api/v2/products/{response_json['product_id']}/",
+            headers=headers,
+            json={"tags": data["tags"]},
+            verify=True,
+            proxies=proxies,
+            timeout=5,
         )
+        patch_response.raise_for_status()
 
-        _DEFECT_DOJO_PRODUCT_TYPE_NAME = (
-            eval(settings.DEFECT_DOJO_PRODUCT_TYPE_NAME)
-            if settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME
-            else settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
-        )
-        _DEFECT_DOJO_SERVICE_NAME = (
-            eval(settings.DEFECT_DOJO_SERVICE_NAME)
-            if settings.DEFECT_DOJO_EVAL_SERVICE_NAME
-            else settings.DEFECT_DOJO_SERVICE_NAME
-        )
+        REQUESTS_TOTAL.labels("success").inc()
+        logger.info(f"Successfully processed {body['kind']} {meta['name']}")
+        logger.debug(f"Response: {response.content}")
 
-        print(f"tags ===== {settings.DEFECT_DOJO_TAGS}")
-        _DEFECT_DOJO_TAGS: list[str] = [
-            eval(tag) if settings.DEFECT_DOJO_EVAL_TAGS else tag
-            for tag in settings.DEFECT_DOJO_TAGS
-        ]
+    except HTTPError as http_err:
+        REQUESTS_TOTAL.labels("failed").inc()
+        logger.error(f"HTTP error: {http_err}, Response: {response.content}")
+        raise kopf.TemporaryError(f"HTTP error: {http_err}", delay=60)
+    except RequestException as req_err:
+        REQUESTS_TOTAL.labels("failed").inc()
+        logger.error(f"Request error: {req_err}")
+        raise kopf.TemporaryError(f"Request error: {req_err}", delay=60)
+    except Exception as err:
+        REQUESTS_TOTAL.labels("failed").inc()
+        logger.error(f"Unexpected error: {err}")
+        raise kopf.TemporaryError(f"Unexpected error: {err}", delay=60)
 
-        _DEFECT_DOJO_ENV_NAME = (
-            eval(settings.DEFECT_DOJO_ENV_NAME)
-            if settings.DEFECT_DOJO_EVAL_ENV_NAME
-            else settings.DEFECT_DOJO_ENV_NAME
-        )
+labels = {settings.Settings.LABEL: settings.Settings.LABEL_VALUE} if settings.Settings.LABEL and settings.Settings.LABEL_VALUE else {}
+validate_reports(settings.Settings.REPORTS)
 
-        _DEFECT_DOJO_TEST_TITLE = (
-            eval(settings.DEFECT_DOJO_TEST_TITLE)
-            if settings.DEFECT_DOJO_EVAL_TEST_TITLE
-            else settings.DEFECT_DOJO_TEST_TITLE
-        )
-
-        # define the vulnerabilityreport as a json-file so DD accepts it
-        json_string: str = json.dumps(full_object)
-        json_file: BytesIO = BytesIO(json_string.encode("utf-8"))
-        report_file: dict = {"file": ("report.json", json_file)}
-
-        headers: dict = {
-            "Authorization": "Token " + settings.DEFECT_DOJO_API_KEY,
-            "Accept": "application/json",
-        }
-
-        data: dict = {
-            "active": settings.DEFECT_DOJO_ACTIVE,
-            "verified": settings.DEFECT_DOJO_VERIFIED,
-            "close_old_findings": settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS,
-            "close_old_findings_product_scope": settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS_PRODUCT_SCOPE,
-            "push_to_jira": settings.DEFECT_DOJO_PUSH_TO_JIRA,
-            "minimum_severity": settings.DEFECT_DOJO_MINIMUM_SEVERITY,
-            "auto_create_context": settings.DEFECT_DOJO_AUTO_CREATE_CONTEXT,
-            "deduplication_on_engagement": settings.DEFECT_DOJO_DEDUPLICATION_ON_ENGAGEMENT,
-            "scan_type": "Trivy Operator Scan",
-            "engagement_name": _DEFECT_DOJO_ENGAGEMENT_NAME,
-            "product_name": _DEFECT_DOJO_PRODUCT_NAME,
-            "product_type_name": _DEFECT_DOJO_PRODUCT_TYPE_NAME,
-            "service": _DEFECT_DOJO_SERVICE_NAME,
-            "environment": _DEFECT_DOJO_ENV_NAME,
-            "test_title": _DEFECT_DOJO_TEST_TITLE,
-            "do_not_reactivate": settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
-        }
-
-        if len(_DEFECT_DOJO_TAGS) > 0:
-          data["tags"] = _DEFECT_DOJO_TAGS
-
-        logger.debug(data)
-
-        try:
-            response: requests.Response = requests.post(
-                settings.DEFECT_DOJO_URL + "/api/v2/reimport-scan/",
-                headers=headers,
-                data=data,
-                files=report_file,
-                verify=True,
-                proxies=proxies,
-                timeout=5
-            )
-            response.raise_for_status()
-        except HTTPError as http_err:
-            c.labels("failed").inc()
-            logger.debug(f"failed status code: {response.status_code}")
-            raise kopf.TemporaryError(
-                f"HTTP error occurred: {http_err} - {response.content}. Retrying in 60 seconds",
-                delay=60,
-            )
-        except Exception as err:
-            c.labels("failed").inc()
-            raise kopf.TemporaryError(
-                f"Other error occurred: {err}. Retrying in 60 seconds", delay=60
-            )
-        else:
-            c.labels("success").inc()
-            logger.info(f"Finished {body['kind']} {meta['name']}")
-            logger.debug(response.content)
+for report in settings.Settings.REPORTS:
+    kopf.on.create(f"{report.lower()}.aquasecurity.github.io", labels=labels)(send_to_dojo)
