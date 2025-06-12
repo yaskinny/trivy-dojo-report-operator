@@ -21,6 +21,10 @@ proxies = {
     "https": settings.HTTPS_PROXY,
 } if settings.HTTP_PROXY or settings.HTTPS_PROXY else None
 
+@kopf.on.probe(id="health")
+def healthCheck(**kwargs):
+  return "ok"
+
 def check_allowed_reports(report: str):
     allowed_reports: list[str] = [
         "configauditreports",
@@ -116,6 +120,12 @@ for report in settings.REPORTS:
             else settings.DEFECT_DOJO_SERVICE_NAME
         )
 
+        print(f"tags ===== {settings.DEFECT_DOJO_TAGS}")
+        _DEFECT_DOJO_TAGS: list[str] = [
+            eval(tag) if settings.DEFECT_DOJO_EVAL_TAGS else tag
+            for tag in settings.DEFECT_DOJO_TAGS
+        ]
+
         _DEFECT_DOJO_ENV_NAME = (
             eval(settings.DEFECT_DOJO_ENV_NAME)
             if settings.DEFECT_DOJO_EVAL_ENV_NAME
@@ -157,6 +167,9 @@ for report in settings.REPORTS:
             "do_not_reactivate": settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
         }
 
+        if len(_DEFECT_DOJO_TAGS) > 0:
+          data["tags"] = _DEFECT_DOJO_TAGS
+
         logger.debug(data)
 
         try:
@@ -167,10 +180,12 @@ for report in settings.REPORTS:
                 files=report_file,
                 verify=True,
                 proxies=proxies,
+                timeout=5
             )
             response.raise_for_status()
         except HTTPError as http_err:
             c.labels("failed").inc()
+            logger.debug(f"failed status code: {response.status_code}")
             raise kopf.TemporaryError(
                 f"HTTP error occurred: {http_err} - {response.content}. Retrying in 60 seconds",
                 delay=60,

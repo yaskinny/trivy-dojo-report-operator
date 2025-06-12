@@ -71,6 +71,9 @@ DEFECT_DOJO_EVAL_PRODUCT_NAME: bool = get_env_var_bool("DEFECT_DOJO_EVAL_PRODUCT
 
 DEFECT_DOJO_DO_NOT_REACTIVATE: bool = get_env_var_bool("DEFECT_DOJO_DO_NOT_REACTIVATE")
 
+DEFECT_DOJO_EVAL_TAGS: bool = get_env_var_bool("DEFECT_DOJO_EVAL_TAGS")
+DEFECT_DOJO_TAGS: list = os.getenv("DEFECT_DOJO_TAGS", "").split(",")
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 REPORTS: list = os.getenv("REPORTS", "vulnerabilityreports").split(",")
