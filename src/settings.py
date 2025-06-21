@@ -12,6 +12,9 @@ class Settings:
     DEFECT_DOJO_API_KEY: str = get_required_env_var("DEFECT_DOJO_API_KEY")
     DEFECT_DOJO_URL: str = get_required_env_var("DEFECT_DOJO_URL").rstrip("/")
 
+    DEFECT_DOJO_JIRA_INSTANCE_ID: str = get_required_env_var("DEFECT_DOJO_JIRA_INSTANCE_ID")
+    DEFECT_DOJO_JIRA_KEY: str =  get_required_env_var("DEFECT_DOJO_JIRA_KEY")
+
     DEFECT_DOJO_ACTIVE: bool = get_env_var_bool("DEFECT_DOJO_ACTIVE")
     DEFECT_DOJO_VERIFIED: bool = get_env_var_bool("DEFECT_DOJO_VERIFIED")
     DEFECT_DOJO_CLOSE_OLD_FINDINGS: bool = get_env_var_bool("DEFECT_DOJO_CLOSE_OLD_FINDINGS")
@@ -46,6 +49,7 @@ class Settings:
 
     DEFECT_DOJO_EVAL_TAGS: bool = get_env_var_bool("DEFECT_DOJO_EVAL_TAGS")
     DEFECT_DOJO_TAGS: List[str] = get_env_var_list("DEFECT_DOJO_TAGS")
+
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
     REPORTS: List[str] = get_env_var_list("REPORTS", ["vulnerabilityreports"])

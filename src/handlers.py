@@ -113,6 +113,10 @@ def prepare_dojo_data(body: Dict, meta: Dict) -> Dict:
         ) if settings.Settings.DEFECT_DOJO_EVAL_TEST_TITLE else settings.Settings.DEFECT_DOJO_TEST_TITLE,
         "do_not_reactivate": settings.Settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
         "tags": tags,
+        ## !TODO: make it optional to enable/disable jira
+        "push_to_jira": True,
+        "active": True,
+        "verified": True,
     }
 
 @REQUEST_TIME.time()
@@ -134,6 +138,9 @@ def send_to_dojo(body: Dict, meta: Dict[str, str], logger: Any, **_) -> None:
     data = prepare_dojo_data(body, meta)
 
     try:
+        ## !TODO:
+        ## this is not efficient to go through all jira_projects for each re-import
+        ## move to somewhere else in the code logic
         response = requests.post(
             f"{settings.Settings.DEFECT_DOJO_URL}/api/v2/reimport-scan/",
             headers=headers,
@@ -156,13 +163,46 @@ def send_to_dojo(body: Dict, meta: Dict[str, str], logger: Any, **_) -> None:
         )
         patch_response.raise_for_status()
 
+        get_jira_projects_response = requests.get(
+            f"{settings.Settings.DEFECT_DOJO_URL}/api/v2/jira_projects/",
+            headers=headers,
+            verify=True,
+            proxies=proxies,
+            timeout=5,
+        )
+        get_jira_projects_response.raise_for_status()
+        jp_response_json = get_jira_projects_response.json()
+        found_jp = False
+        for proj in jp_response_json["results"]:
+          if proj["product"] == response_json["product_id"]:
+            logger.info(f"jira project found for {response_json['product_id']} -- skipping")
+            found_jp = True
+            break
+        if not found_jp:
+          jira_project_creation_response = requests.post(
+            f"{settings.Settings.DEFECT_DOJO_URL}/api/v2/jira_projects/",
+            headers=headers,
+            json={
+              "project_key": f"{settings.Settings.DEFECT_DOJO_JIRA_KEY}",
+              ## TODO: since we are going to use just one jira integration, it can be set to a single value
+              "jira_instance": int(settings.Settings.DEFECT_DOJO_JIRA_INSTANCE_ID),
+              "product": f"{response_json['product_id']}",
+            },
+            verify=True,
+            proxies=proxies,
+            timeout=5,
+          )
+          jira_project_creation_response.raise_for_status()
+
         REQUESTS_TOTAL.labels("success").inc()
         logger.info(f"Successfully processed {body['kind']} {meta['name']}")
         logger.debug(f"Response: {response.content}")
 
     except HTTPError as http_err:
         REQUESTS_TOTAL.labels("failed").inc()
-        logger.error(f"HTTP error: {http_err}, Response: {response.content}")
+        error_response = http_err.response
+        error_content = error_response.content if error_response else "No response"
+        logger.error(f"HTTP error: {http_err}, Response: {error_content}")
         raise kopf.TemporaryError(f"HTTP error: {http_err}", delay=60)
     except RequestException as req_err:
         REQUESTS_TOTAL.labels("failed").inc()
