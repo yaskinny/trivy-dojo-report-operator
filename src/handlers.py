@@ -71,6 +71,14 @@ def prepare_dojo_data(body: Dict, meta: Dict) -> Dict:
             if evaluated_tag:
                 tags.append(evaluated_tag)
 
+    ptn = (evaluate_setting(
+          settings.Settings.DEFECT_DOJO_PRODUCT_NAME,
+          context,
+          settings.Settings.DEFECT_DOJO_PRODUCT_NAME
+        ) if settings.Settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.Settings.DEFECT_DOJO_PRODUCT_NAME,)[0]
+
+    tags.append(ptn)
+
     return {
         "active": settings.Settings.DEFECT_DOJO_ACTIVE,
         "verified": settings.Settings.DEFECT_DOJO_VERIFIED,
@@ -86,11 +94,7 @@ def prepare_dojo_data(body: Dict, meta: Dict) -> Dict:
             context,
             settings.Settings.DEFECT_DOJO_ENGAGEMENT_NAME or ""
         ) if settings.Settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else settings.Settings.DEFECT_DOJO_ENGAGEMENT_NAME or "",
-        "product_name": evaluate_setting(
-            settings.Settings.DEFECT_DOJO_PRODUCT_NAME,
-            context,
-            settings.Settings.DEFECT_DOJO_PRODUCT_NAME
-        ) if settings.Settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.Settings.DEFECT_DOJO_PRODUCT_NAME,
+        "product_name": ptn,
         "product_type_name": evaluate_setting(
             settings.Settings.DEFECT_DOJO_PRODUCT_TYPE_NAME,
             context,
